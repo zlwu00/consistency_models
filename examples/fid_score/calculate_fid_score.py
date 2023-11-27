@@ -36,7 +36,7 @@ def parse_args():
         "-p",
         "--pretrained_model_name_or_path",
         type=str,
-        default="consistency/cifar10-32-demo",
+        default="Arthuerwang/cm-cifar10-32-fix_noise",
     )
     parser.add_argument(
         "-n",

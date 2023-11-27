@@ -8,3 +8,10 @@ poetry.toml
 .mypy_cache
 .ruff_cache
 pyproject.toml
+samples/
+wandb/
+cm-cifar10-32/
+ckpt/
+cm-cifar10-32-fix_noise/
+assets/
+experiments/

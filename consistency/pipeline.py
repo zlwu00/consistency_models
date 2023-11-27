@@ -3,7 +3,7 @@ from typing import List, Optional, Tuple, Union
 
 import torch
 from diffusers import DiffusionPipeline, ImagePipelineOutput, UNet2DModel
-from diffusers.utils import randn_tensor
+from diffusers.utils.torch_utils import randn_tensor
 
 
 class ConsistencyPipeline(DiffusionPipeline):
@@ -12,9 +12,14 @@ class ConsistencyPipeline(DiffusionPipeline):
     def __init__(
         self,
         unet: UNet2DModel,
+        MLP,
+        norm,
     ) -> None:
         super().__init__()
         self.register_modules(unet=unet)
+        self.MLP = MLP
+        self.norm = norm
+
 
     @torch.no_grad()
     def __call__(
@@ -29,13 +34,21 @@ class ConsistencyPipeline(DiffusionPipeline):
         **kwargs,
     ) -> Union[Tuple, ImagePipelineOutput]:
         img_size = self.unet.config.sample_size
-        shape = (1, 3, img_size, img_size)
+        shape = (1, 32)
+        # shape = (1, 3, img_size, img_size)
 
         model = self.unet
 
         time: float = time_max
 
-        sample = randn_tensor(shape, generator=generator, device=self.device) * time
+        noise = randn_tensor(shape, generator=generator, device=self.device)
+        noise = self.MLP(noise)
+        noise = self.norm(noise)
+        noise = noise.reshape(1, 3, 32, 32)
+
+        sample = noise * time
+
+        # sample = randn_tensor(shape, generator=generator, device=self.device) * time
 
         for step in self.progress_bar(range(steps)):
             if step > 0:

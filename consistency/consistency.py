@@ -6,9 +6,10 @@ from pathlib import Path
 from typing import List, Optional, Type, Union
 
 import torch
+from torch import nn
 from diffusers import UNet2DModel
 from diffusers.models.unet_2d import UNet2DOutput
-from diffusers.utils import randn_tensor
+from diffusers.utils.torch_utils import randn_tensor
 from pytorch_lightning import LightningModule
 from pytorch_lightning.loggers.wandb import WandbLogger
 from pytorch_lightning.utilities import rank_zero_only
@@ -84,6 +85,10 @@ class Consistency(LightningModule):
         self.use_ema = use_ema
         self.sample_seed = sample_seed
 
+        self.MLP = nn.Linear(32, 32 * 32 * 3)
+        self.BatchNorm = nn.BatchNorm1d(32 * 32 * 3)
+        self.hidden_size = 32
+
         self.push_to_hub = True if model_id else False
 
         if self.push_to_hub:
@@ -94,6 +99,9 @@ class Consistency(LightningModule):
 
     @rank_zero_only
     def setup(self, *args, **kwargs) -> None:
+        '''
+        Connect to huggingface and push the trained model up to own space
+        '''
         if self.push_to_hub:
             import huggingface_hub
 
@@ -131,6 +139,7 @@ class Consistency(LightningModule):
         times: torch.Tensor,
         clip: bool = True,
     ):
+    #
         skip_coef = self.data_std**2 / (
             (times - self.time_min).pow(2) + self.data_std**2
         )
@@ -153,36 +162,53 @@ class Consistency(LightningModule):
 
     def training_step(self, images: torch.Tensor, *args, **kwargs):
         _bins = self.bins
+        
+        noise = images[1]
+        noise = self.MLP(noise)
+        noise = self.BatchNorm(noise)
+        
+        batch_size, channel, h, w = images[0].shape
+        
+        noise = noise.reshape(batch_size, channel, h, w)
 
-        noise = torch.randn(images.shape, device=images.device)
+        # noise_disturbation = torch.randn(images[0].shape, device=images[0].device) * 0.3
+
+        # noise = noise + noise_disturbation
+
         timesteps = torch.randint(
             0,
             _bins - 1,
-            (images.shape[0],),
-            device=images.device,
+            (images[0].shape[0],),
+            device=images[0].device,
         ).long()
 
-        current_times = self.timesteps_to_times(timesteps, _bins)
+
+        current_time = self.timesteps_to_times(timesteps, _bins)
         next_times = self.timesteps_to_times(timesteps + 1, _bins)
 
-        current_noise_image = images + self.image_time_product(
+        current_noise_image = images[0] + self.image_time_product(
             noise,
-            current_times,
+            current_time
         )
 
-        next_noise_image = images + self.image_time_product(
+        next_noise_image = images[0] + self.image_time_product(
             noise,
             next_times,
         )
 
         with torch.no_grad():
-            target = self._forward(
+            target1 = self._forward(
                 self.model_ema,
                 current_noise_image,
-                current_times,
+                current_time,
             )
 
-        loss = self.loss_fn(self(next_noise_image, next_times), target)
+        #target2 = images[0].clamp(-1.0, 1.0)
+        
+
+        loss = self.loss_fn(self(next_noise_image, next_times), target1)
+        #loss2 = self.loss_fn(self(next_noise_image, next_times), target2)
+
 
         self._loss_tracker(loss)
         self.log(
@@ -215,7 +241,9 @@ class Consistency(LightningModule):
             and self.trainer.global_step > 0
         ):
             pipeline = ConsistencyPipeline(
-                unet=self.model_ema if self.use_ema else self.model,
+                unet=self.model_ema if self.use_ema else self.model, 
+                MLP=self.MLP, 
+                norm=self.BatchNorm,
             )
 
             pipeline.save_pretrained(self.model_id)
@@ -313,13 +341,21 @@ class Consistency(LightningModule):
         generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
         use_ema: bool = False,
     ) -> torch.Tensor:
-        shape = (num_samples, self.channels, self.image_size, self.image_size)
+        shape = (num_samples,self.hidden_size)
+        noise = randn_tensor(shape, generator=generator, device=self.device)
+        noise = self.MLP(noise)
+        noise = self.BatchNorm(noise)
+        
+        noise = noise.reshape(num_samples, self.channels, self.image_size, self.image_size)
+
+        # shape = (num_samples, self.channels, self.image_size, self.image_size) 
 
         time = torch.tensor([self.time_max], device=self.device)
 
         images: torch.Tensor = self._forward(
             self.model_ema if use_ema else self.model,
-            randn_tensor(shape, generator=generator, device=self.device) * time,
+            #randn_tensor(shape, generator=generator, device=self.device) * time,
+            noise * time,
             time,
         )
 
@@ -337,6 +373,10 @@ class Consistency(LightningModule):
 
         for time in times:
             noise = randn_tensor(shape, generator=generator, device=self.device)
+            noise = self.MLP(noise)
+            noise = self.BatchNorm(noise)
+            noise = noise.reshape(num_samples, self.channels, self.image_size, self.image_size)
+            # noise = randn_tensor(shape, generator=generator, device=self.device)
             images = images + math.sqrt(time.item() ** 2 - self.time_min**2) * noise
             images = self._forward(
                 self.model_ema if use_ema else self.model,
@@ -390,3 +430,5 @@ class Consistency(LightningModule):
     @staticmethod
     def image_time_product(images: torch.Tensor, times: torch.Tensor):
         return torch.einsum("b c h w, b -> b c h w", images, times)
+    
+   
